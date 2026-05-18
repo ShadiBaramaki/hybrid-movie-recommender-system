@@ -99,7 +99,3 @@ This project implements:
 - User-Item Matrix
 - Collaborative Filtering
 - Hybrid Recommendation Systems
-
----
-rname/movie-recommender.git
-cd movie-recommender
