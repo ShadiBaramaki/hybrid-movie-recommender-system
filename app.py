@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import CountVectorizer
 from scipy.sparse import csr_matrix
-import numpy as np
 
 
 @st.cache_data
@@ -14,30 +14,25 @@ def load_data():
 
 
 @st.cache_data
-def build_cf_matrix(ratings):
+def build_cb_matrix(movies):
+    cv = CountVectorizer(tokenizer=lambda x: x.split("|"), token_pattern=None)
+    genre_matrix = cv.fit_transform(movies["genres"])
+    return genre_matrix
+
+
+@st.cache_data
+def build_user_movie_sparse(ratings):
     user_movie = ratings.pivot_table(
         index="userId",
         columns="movieId",
         values="rating"
     ).fillna(0)
-    sparse = csr_matrix(user_movie.values.T)
-    cf_sim = cosine_similarity(sparse, dense_output=False)
-    return pd.DataFrame(
-        cf_sim.toarray(),
-        index=user_movie.columns,
-        columns=user_movie.columns
-    )
+    movie_ids = user_movie.columns.tolist()
+    sparse = csr_matrix(user_movie.values.T)  # shape: (movies, users)
+    return sparse, movie_ids
 
 
-@st.cache_data
-def build_cb_matrix(movies):
-    cv = CountVectorizer(tokenizer=lambda x: x.split("|"), token_pattern=None)
-    genre_matrix = cv.fit_transform(movies["genres"])
-    cb_sim = cosine_similarity(genre_matrix)
-    return cb_sim
-
-
-def hybrid_recommend(movie_title, movies, cf_df, cb_sim, top_n=5):
+def hybrid_recommend(movie_title, movies, sparse_matrix, movie_ids, genre_matrix, top_n=5):
     idx_list = movies[movies["title"] == movie_title].index
     if len(idx_list) == 0:
         return pd.DataFrame()
@@ -45,32 +40,38 @@ def hybrid_recommend(movie_title, movies, cf_df, cb_sim, top_n=5):
     idx = idx_list[0]
     movie_id = movies.loc[idx, "movieId"]
 
-    if movie_id not in cf_df.columns:
+    if movie_id not in movie_ids:
         return pd.DataFrame()
 
-    cf_scores = cf_df[movie_id]
-    cb_scores = pd.Series(cb_sim[idx], index=movies["movieId"])
+    movie_pos = movie_ids.index(movie_id)
 
-    common_ids = cf_scores.index.intersection(cb_scores.index)
-    hybrid_scores = (cf_scores[common_ids] + cb_scores[common_ids]) / 2
+    # CF: فقط یه ردیف حساب کن نه کل ماتریس
+    movie_vec = sparse_matrix[movie_pos]
+    cf_scores = cosine_similarity(movie_vec, sparse_matrix).flatten()
+    cf_series = pd.Series(cf_scores, index=movie_ids)
 
-    top_ids = hybrid_scores.sort_values(ascending=False).iloc[1:top_n+1].index
+    # CB: فقط یه ردیف
+    cb_scores_arr = cosine_similarity(genre_matrix[idx], genre_matrix).flatten()
+    cb_series = pd.Series(cb_scores_arr, index=movies["movieId"].tolist())
+
+    common_ids = cf_series.index.intersection(cb_series.index)
+    hybrid_scores = (cf_series[common_ids] + cb_series[common_ids]) / 2
+    hybrid_scores = hybrid_scores.drop(movie_id, errors="ignore")
+
+    top_ids = hybrid_scores.sort_values(ascending=False).head(top_n).index
     return movies[movies["movieId"].isin(top_ids)][["title", "genres"]]
 
 
 # UI
-st.title("Movie Recommender System")
-st.markdown(
-    "Find similar movies using a Hybrid Recommendation System "
-    "(Collaborative + Content-Based Filtering)"
-)
+st.title("🎬 Movie Recommender System")
+st.markdown("Hybrid Recommendation (Collaborative + Content-Based Filtering)")
 
 with st.spinner("Loading data..."):
     movies, ratings = load_data()
+    genre_matrix = build_cb_matrix(movies)
+    sparse_matrix, movie_ids = build_user_movie_sparse(ratings)
 
-with st.spinner("Building recommendation model (first load only)..."):
-    cf_df = build_cf_matrix(ratings)
-    cb_sim = build_cb_matrix(movies)
+st.success("Model ready!")
 
 movie_list = sorted(movies["title"].tolist())
 
@@ -87,7 +88,10 @@ if st.button("🎯 Recommend Movies"):
     if selected_movie is None:
         st.warning("Please select a movie first.")
     else:
-        results = hybrid_recommend(selected_movie, movies, cf_df, cb_sim, top_n=top_n)
+        with st.spinner("Finding recommendations..."):
+            results = hybrid_recommend(
+                selected_movie, movies, sparse_matrix, movie_ids, genre_matrix, top_n
+            )
 
         if results.empty:
             st.error("Movie not found in recommendation database.")
